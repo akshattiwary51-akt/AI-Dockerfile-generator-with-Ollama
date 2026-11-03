@@ -1,0 +1,74 @@
+
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python testing and cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ==============================
+# Environment variables / Secrets
+# ==============================
+.env
+.env.*
+!.env.example
+
+# Credentials and private keys
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# ==============================
+# Logs and generated output
+# ==============================
+logs/
+*.log
+
+# Ignore generated runtime reports
+generated/*
+!generated/.gitkeep
+
+# Temporary and backup files
+*.tmp
+*.bak
+*.swp
+*.orig
+
+# ==============================
+# IDE and OS files
+# ==============================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ==============================
+# Local databases
+# ==============================
+*.sqlite
+*.sqlite3
+*.db
