@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional, Protocol
 
 from app.agent.execution_history import ExecutionHistory
+from app.agent.patch_guard import find_regressions
 from app.analyzer.models import ProjectAnalysis
 from app.docker.docker_builder import BuildResult
 from app.docker.docker_validator import ValidationReport, validate_artifacts
@@ -99,6 +100,7 @@ class DockerfileGenerator:
         self.settings = settings or get_settings()
         self.max_format_retries = max_format_retries
         self.messages: list[dict[str, str]] = []
+        self.format_retries = 0  # extra round-trips used by the most recent generate()/correct() call
 
     def generate(self, analysis: ProjectAnalysis) -> GeneratedArtifacts:
         self.messages = pb.build_generation_messages(analysis, self.settings)
@@ -106,11 +108,13 @@ class DockerfileGenerator:
         return result
 
     def correct(self, analysis: ProjectAnalysis, history: ExecutionHistory, current: GeneratedArtifacts,
-                build: BuildResult) -> CorrectionResult:
+                build: BuildResult, diagnosis: Any = None, repeat_count: int = 1,
+                known_fixes: Optional[list[str]] = None) -> CorrectionResult:
         log_tail = build.combined_output
         msg = pb.build_correction_message(
             analysis, history, current.dockerfile, current.dockerignore, error_summary=build.error_summary,
-            log_tail=log_tail, failed_stage=build.failed_stage, exit_code=build.exit_code, settings=self.settings)
+            log_tail=log_tail, failed_stage=build.failed_stage, exit_code=build.exit_code, settings=self.settings,
+            diagnosis=diagnosis, repeat_count=repeat_count, known_fixes=known_fixes)
         if not self.messages:  # corrections without a prior generate() in this process (e.g. UI reruns)
             self.messages = [{"role": "system", "content": pb.CORRECTION_SYSTEM}]
         else:
@@ -140,15 +144,39 @@ class DockerfileGenerator:
                 assert isinstance(retry, CorrectionResult)
                 if retry.recoverable:
                     result = retry
+        if result.recoverable:
+            result = self._guard_against_regressions(analysis, current, result)
         if result.recoverable and not result.changes:
             result.changes = summarize_diff(current.dockerfile, result.dockerfile)
+        return result
+
+    def _guard_against_regressions(self, analysis: ProjectAnalysis, current: GeneratedArtifacts,
+                                   result: CorrectionResult) -> CorrectionResult:
+        """A correction must not trade the build error for a worse Dockerfile (dropped USER, new blockers, ...)."""
+        problems = find_regressions(current, result, analysis)
+        if not problems:
+            return result
+        log.warning("Correction rejected for regressions: %s", "; ".join(problems))
+        self.messages.append({"role": "user", "content": (
+            "Your corrected Dockerfile is worse than the previous one in these ways:\n- " + "\n- ".join(problems) +
+            "\nFix the original build error WITHOUT these regressions and reply with the full JSON again.")})
+        retry, _ = self._converse(correction=True)
+        assert isinstance(retry, CorrectionResult)
+        if retry.recoverable and not find_regressions(current, retry, analysis):
+            return retry
+        remaining = find_regressions(current, retry, analysis) if retry.recoverable else problems
+        result.recoverable = False
+        result.root_cause = ((result.root_cause + " ") if result.root_cause else "") + \
+            "[Correction rejected: it " + "; it ".join(remaining) + "]"
         return result
 
     def _converse(self, *, correction: bool) -> tuple[GeneratedArtifacts, ValidationReport]:
         parser = parse_correction if correction else parse_generation
         schema = pb.json_schema_for(correction)
         last_problem = "unknown problem"
+        self.format_retries = 0
         for attempt in range(self.max_format_retries + 1):
+            self.format_retries = attempt
             raw = self.client.chat(pb.trim_conversation(self.messages), schema=schema)
             self.messages.append({"role": "assistant", "content": raw})
             try:

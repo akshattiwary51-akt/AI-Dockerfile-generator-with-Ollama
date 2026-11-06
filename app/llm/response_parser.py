@@ -80,12 +80,19 @@ class CorrectionResult(GeneratedArtifacts):
     dockerfile: str = ""  # may be empty when the failure is not recoverable
     root_cause: str = ""
     changes: list[str] = Field(default_factory=list)
+    expected_effect: str = ""
+    remaining_risks: list[str] = Field(default_factory=list)
     recoverable: bool = True
 
     def _dockerfile_required(self) -> bool:
         return self.recoverable
 
-    @field_validator("changes", mode="before")
+    @field_validator("expected_effect", "root_cause", mode="before")
+    @classmethod
+    def _text(cls, v: Any) -> Any:
+        return "" if v is None else (v if isinstance(v, str) else str(v))
+
+    @field_validator("changes", "remaining_risks", mode="before")
     @classmethod
     def _changes(cls, v: Any) -> Any:
         if v is None or v == "":

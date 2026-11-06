@@ -21,6 +21,15 @@ class AttemptRecord(BaseModel):
     changes: list[str] = Field(default_factory=list)  # fixes applied to produce the next Dockerfile
     duration_seconds: float = 0.0
     timed_out: bool = False
+    category: str = ""             # error_classifier.ErrorCategory value
+    fixable: Optional[bool] = None
+    failing_instruction: Optional[str] = None
+    signature: str = ""
+    repeated: int = 1              # consecutive occurrences of this exact error, including this one
+    explanation: str = ""          # LLM explanation of the fix
+    expected_effect: str = ""
+    remaining_risks: list[str] = Field(default_factory=list)
+    diff: str = ""                 # unified diff from this attempt's Dockerfile to the corrected one
     started_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
     @property
@@ -62,6 +71,7 @@ class ExecutionHistory(BaseModel):
                 continue
             err = a.error.strip().splitlines()
             lines.append(f"- Attempt {a.attempt}: failed"
+                         + (f" [{a.category}]" if a.category else "")
                          + (f" at stage '{a.failed_stage}'" if a.failed_stage else "")
                          + f". Error: {err[-1][:300] if err else 'n/a'}"
                          + (f"\n  Diagnosis: {a.diagnosis[:400]}" if a.diagnosis else "")
@@ -79,12 +89,21 @@ class ExecutionHistory(BaseModel):
                 out.append(f"- Failed stage: `{a.failed_stage}`")
             if a.exit_code is not None:
                 out.append(f"- Exit code: {a.exit_code}")
+            if a.category:
+                out.append(f"- Category: `{a.category}`" + ("" if a.fixable is None else
+                                                          f" (fixable by Dockerfile edit: {'yes' if a.fixable else 'no'})"))
             if a.diagnosis:
                 out.append(f"- Diagnosis: {a.diagnosis}")
+            if a.expected_effect:
+                out.append(f"- Expected effect: {a.expected_effect}")
+            for r in a.remaining_risks:
+                out.append(f"- Remaining risk: {r}")
             for c in a.changes:
                 out.append(f"- Change: {c}")
             if a.error:
                 out += ["", "```text", a.error.strip(), "```"]
+            if a.diff:
+                out += ["", "```diff", a.diff.rstrip(), "```"]
             out += ["", "<details><summary>Dockerfile</summary>", "", "```dockerfile", a.dockerfile.rstrip(), "```",
                     "", "</details>", ""]
         return "\n".join(out)

@@ -23,7 +23,7 @@ NON_UNIT_DIRS = {"test", "tests", "__tests__", "example", "examples", "docs", "d
                  "e2e", "benchmarks", "scripts", "tools"}
 DOCKER_FILE_PATTERNS = ("Dockerfile", "Dockerfile.*", "*.Dockerfile", ".dockerignore", "docker-compose*.yml",
                         "docker-compose*.yaml", "compose*.yml", "compose*.yaml")
-CODE_EXTS = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".java", ".kt"}
+CODE_EXTS = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".java", ".kt", ".php", ".rb"}
 ENV_PATTERNS = [
     re.compile(r"os\.environ(?:\.get)?\s*[\(\[]\s*['\"]([A-Z][A-Z0-9_]+)['\"]"),
     re.compile(r"os\.getenv\(\s*['\"]([A-Z][A-Z0-9_]+)['\"]"),
@@ -32,7 +32,20 @@ ENV_PATTERNS = [
     re.compile(r"import\.meta\.env\.([A-Z][A-Z0-9_]+)"),
     re.compile(r"os\.(?:Getenv|LookupEnv)\(\s*\"([A-Z][A-Z0-9_]+)\""),
     re.compile(r"System\.getenv\(\s*\"([A-Z][A-Z0-9_]+)\""),
+    re.compile(r"(?:getenv|env)\(\s*['\"]([A-Z][A-Z0-9_]+)['\"]"),           # PHP getenv()/Laravel env()
+    re.compile(r"\$_(?:ENV|SERVER)\[\s*['\"]([A-Z][A-Z0-9_]+)['\"]\s*\]"),      # PHP superglobals
+    re.compile(r"ENV(?:\.fetch)?[\[\(]\s*['\"]([A-Z][A-Z0-9_]+)['\"]"),           # Ruby ENV['X'] / ENV.fetch('X')
 ]
+
+SERVICE_SIGNATURES: dict[str, tuple[str, ...]] = {
+    "postgres": ("psycopg", "psycopg2", "psycopg2-binary", "asyncpg", "pg", "pg-promise", "postgres", "pgx",
+                 "lib/pq", "org.postgresql", "postgresql", "pdo_pgsql", "node-postgres", "sequelize-pg"),
+    "mysql": ("mysqlclient", "pymysql", "mysql-connector-python", "aiomysql", "mysql2", "mysql", "go-sql-driver/mysql",
+              "mysql-connector-j", "mysql-connector-java", "mariadb"),
+    "redis": ("redis", "aioredis", "ioredis", "go-redis", "jedis", "lettuce", "spring-boot-starter-data-redis",
+              "predis/predis", "redis-rb", "django-redis", "celery-redis"),
+    "mongo": ("pymongo", "motor", "mongoose", "mongodb", "mongo-driver", "mongoid", "spring-boot-starter-data-mongodb"),
+}
 ENV_NOISE = {"PATH", "HOME", "PWD", "USER", "SHELL", "TERM", "LANG", "TMPDIR", "HOSTNAME", "PYTHONPATH"}
 SECRET_HINTS = ("KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE", "AUTH")
 KEY_CONFIG_GLOBS = ("next.config.*", "vite.config.*", "nuxt.config.*", "tsconfig.json", "application.properties",
@@ -108,7 +121,8 @@ class ProjectScanner:
                     log.warning("Fallback detection failed: %s", exc)
                 units = [primary]
                 manifest_hint = {"Python": "requirements.txt / pyproject.toml / Pipfile / setup.py",
-                                 "JavaScript": "package.json", "Go": "go.mod", "Java": "pom.xml / build.gradle"}[guessed]
+                                 "JavaScript": "package.json", "Go": "go.mod", "Java": "pom.xml / build.gradle",
+                                 "PHP": "composer.json", "Ruby": "Gemfile"}[guessed]
                 warnings.append(f"No dependency manifest found ({manifest_hint}); language guessed from file "
                                 f"extensions as {guessed}. Dependencies cannot be determined.")
             else:
@@ -130,11 +144,17 @@ class ProjectScanner:
             analysis.warnings.append(
                 "Multiple sub-projects detected (" + ", ".join(f"{u.path}:{u.framework or u.language}" for u in units)
                 + "); the primary unit is used for the Dockerfile.")
+        ws_roots = [u for u in units if u.workspace_root]
+        if ws_roots and primary and primary.path != ".":
+            primary.notes.append("npm/yarn/pnpm workspace member: the lockfile lives at the repository root, so run the "
+                                 "install from the root (copy root package.json + lockfile + member manifests).")
         if primary and primary.path != ".":
             analysis.warnings.append(f"No root manifest; primary unit lives in '{primary.path}'. "
                                      "Dockerfile paths must account for this directory.")
 
         analysis.env_vars, analysis.secret_env_vars = self._collect_env_vars(root_path, files, env_templates)
+        analysis.services = self._detect_services(units, analysis.env_vars)
+        analysis.existing_compose = self._read_compose_services(root_path, docker_files)
         analysis.structure = self._render_structure(files)
         analysis.key_files = self._collect_key_files(root_path, primary, files)
         analysis.existing_dockerfile_content = self._read_existing_dockerfile(root_path)
@@ -154,9 +174,56 @@ class ProjectScanner:
         return units
 
     @staticmethod
+    def _detect_services(units: list[ProjectUnit], env_vars: list[str]) -> dict[str, str]:
+        found: dict[str, str] = {}
+        for unit in units:
+            names = {re.split(r"[<>=!~^*,(\[\s@;]", d.strip(), maxsplit=1)[0].lower().replace("_", "-")
+                     for d in unit.dependencies}
+            names |= {n.split(":")[-1] for n in names}
+            for service, sigs in SERVICE_SIGNATURES.items():
+                for sig in sigs:
+                    if service not in found and any(n == sig or n.endswith("/" + sig) or sig in n.split("-") and
+                                                    len(sig) > 4 for n in names):
+                        found[service] = f"dependency '{sig}' in {unit.path}"
+        for var in env_vars:
+            for service in SERVICE_SIGNATURES:
+                if service not in found and service.upper() in var.upper().replace("POSTGRES", "POSTGRES"):
+                    found[service] = f"environment variable name {var} (inferred)"
+        return found
+
+    @staticmethod
+    def _read_compose_services(root: Path, docker_files: list[str]) -> dict[str, list[str]]:
+        result: dict[str, list[str]] = {}
+        for rel in docker_files:
+            if not re.search(r"(docker-)?compose.*\.ya?ml$", rel):
+                continue
+            try:
+                text = (root / rel).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            names: list[str] = []
+            in_services, indent = False, None
+            for line in text.splitlines():
+                if re.match(r"^services:\s*$", line):
+                    in_services = True
+                    continue
+                if in_services:
+                    if line.strip() and not line.startswith((" ", "\t", "#")):
+                        break
+                    m = re.match(r"^(\s+)([A-Za-z0-9_.-]+):\s*$", line)
+                    if m and (indent is None or len(m.group(1)) == indent):
+                        indent = len(m.group(1))
+                        names.append(m.group(2))
+            result[rel] = names
+        return result
+
+    @staticmethod
     def _choose_primary(units: list[ProjectUnit]) -> Optional[ProjectUnit]:
         if not units:
             return None
+        members = [u for u in units if not u.workspace_root]
+        if members:  # a workspace root is only a container; build one of its members
+            units = members
         rank = {"backend": 0, "fullstack": 1, "frontend": 2, "cli": 3, "library": 4, "unknown": 5}
         return sorted(units, key=lambda u: (u.path != ".", rank.get(u.role, 9), len(u.path), u.path))[0]
 

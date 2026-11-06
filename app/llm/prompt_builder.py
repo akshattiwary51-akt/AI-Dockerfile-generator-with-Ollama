@@ -45,7 +45,10 @@ CORRECTION_SCHEMA_HINT = """\
 Respond with ONE JSON object and nothing else (no prose, no markdown fences) using exactly these keys:
 {
   "root_cause": "<what actually caused the failure, referring to the failing instruction and error text>",
-  "changes": ["<each targeted change you made, one per item>"],
+  "explanation": "<why this root cause produces this error and why your change addresses it>",
+  "changes": ["<each exact Dockerfile change you made, one per item, e.g. 'COPY requirement.txt -> requirements.txt'>"],
+  "expected_effect": "<what the rebuilt image should do differently>",
+  "remaining_risks": ["<anything that may still fail or that you could not verify>"],
   "recoverable": <true if a Dockerfile/.dockerignore change can fix it, false otherwise>,
   "dockerfile": "<the FULL corrected Dockerfile>",
   "dockerignore": "<the FULL .dockerignore>",
@@ -102,6 +105,16 @@ def _facts(analysis: ProjectAnalysis) -> str:
             more = f" (+{len(u.dependencies) - 40} more)" if len(u.dependencies) > 40 else ""
             lines.append(f"Dependencies ({len(u.dependencies)}): {', '.join(deps)}{more}")
         lines += [f"Note: {n}" for n in u.notes]
+        if u.confirmed:
+            lines.append("CONFIRMED (read from project files): " + "; ".join(u.confirmed))
+        if u.inferred:
+            lines.append("ASSUMPTIONS (not verified - mention them in limitations): " + "; ".join(u.inferred))
+    if analysis.services:
+        lines.append("Backing services the app appears to use (not part of this image): "
+                     + ", ".join(f"{k} ({v})" for k, v in analysis.services.items()))
+    if analysis.existing_compose:
+        lines.append("Existing compose files: " + "; ".join(f"{f} -> services {', '.join(n) or '?'}"
+                                                             for f, n in analysis.existing_compose.items()))
     if analysis.env_vars:
         plain = [e for e in analysis.env_vars if e not in analysis.secret_env_vars]
         lines.append(f"Environment variables used (names only): {', '.join(plain) or 'none'}")
@@ -170,7 +183,9 @@ def build_generation_messages(analysis: ProjectAnalysis, settings: Optional[Sett
 
 def build_correction_message(analysis: ProjectAnalysis, history: ExecutionHistory, dockerfile: str,
                              dockerignore: str, *, error_summary: str, log_tail: str, failed_stage: Optional[str],
-                             exit_code: Optional[int], settings: Optional[Settings] = None) -> dict[str, str]:
+                             exit_code: Optional[int], settings: Optional[Settings] = None,
+                             diagnosis: Optional[Any] = None, repeat_count: int = 1,
+                             known_fixes: Optional[list[str]] = None) -> dict[str, str]:
     """User message asking for a targeted fix. Self-contained so conversation trimming is safe."""
     settings = settings or get_settings()
     facts = render_project_context(analysis, min(5000, settings.max_context_chars), include_files=False)
@@ -185,6 +200,18 @@ def build_correction_message(analysis: ProjectAnalysis, history: ExecutionHistor
         f"## CURRENT DOCKERFILE (failed)\n```dockerfile\n{dockerfile}\n```",
         f"## CURRENT .dockerignore\n```\n{dockerignore}\n```",
     ]
+    if diagnosis is not None:
+        cls = [f"Category: {diagnosis.category.value}",
+               f"Fixable by editing the Dockerfile/.dockerignore: {'yes' if diagnosis.fixable else 'no'}",
+               f"Failing instruction: {diagnosis.failing_instruction or 'unknown'}",
+               f"Key evidence: {redact_secrets(diagnosis.evidence)}", f"Guidance: {diagnosis.hint}"]
+        if repeat_count >= 2:
+            cls.append(f"This exact error has occurred {repeat_count} times in a row: the previous fix did NOT "
+                       "address the root cause. Form a different hypothesis.")
+        body.append("## CLASSIFIED ERROR (from static log analysis)\n" + "\n".join(cls))
+    if known_fixes:
+        body.append("## FIXES THAT WORKED BEFORE FOR THIS ERROR CATEGORY (local history; reference only, they may "
+                    "not apply here)\n" + "\n".join(f"- {k}" for k in known_fixes))
     if prior:
         body.append("## PREVIOUS ATTEMPTS (do not repeat fixes that already failed)\n" + prior)
     body.append("## BUILD CONSTRAINTS\n"

@@ -76,9 +76,9 @@ def correction_json(dockerfile: str, root_cause: str = "missing build dependency
 
 
 @pytest.fixture
-def settings() -> Settings:
-    return Settings(ollama_host="http://ollama.test:11434", ollama_model="test-model:7b", temperature=0.1,
-                    ollama_timeout=30, num_ctx=4096, max_retries=3, docker_build_timeout=30, max_log_bytes=20_000,
+def settings(tmp_path) -> Settings:
+    return Settings(history_db=str(tmp_path / "history.db"), ollama_host="http://ollama.test:11434", ollama_model="test-model:7b", temperature=0.1,
+                    ollama_timeout=30, ollama_timeout_retries=0, num_ctx=4096, max_retries=3, docker_build_timeout=30, max_log_bytes=20_000,
                     max_context_chars=6000, max_file_bytes=100_000)
 
 
@@ -149,9 +149,10 @@ class FakeBuilder:
     def check_docker(self) -> tuple[bool, str]:
         return True, "Docker Engine fake"
 
-    def build(self, project_dir: Any, image: str, *, on_output: Any = None, cancel_event: Any = None) -> BuildResult:
+    def build(self, project_dir: Any, image: str, *, on_output: Any = None, cancel_event: Any = None,
+              dockerfile: str = "Dockerfile") -> BuildResult:
         self.calls += 1
-        path = Path(project_dir) / "Dockerfile"
+        path = Path(project_dir) / dockerfile
         self.dockerfiles_built.append(path.read_text() if path.exists() else "")
         if on_output:
             on_output(f"fake build output #{self.calls}")

@@ -55,6 +55,19 @@ class Instruction(BaseModel):
     line: int
 
 
+def exposed_ports(dockerfile: str) -> list[int]:
+    """Ports declared by EXPOSE in the Dockerfile (first stage-final declarations first), e.g. ``EXPOSE 8080/tcp``."""
+    out: list[int] = []
+    instrs, _ = parse_instructions(dockerfile)
+    for ins in instrs:
+        if ins.name == "EXPOSE":
+            for tok in ins.args.split():
+                m = re.match(r"(\d{1,5})(?:/(?:tcp|udp))?$", tok)
+                if m and 1 <= int(m.group(1)) <= 65535 and int(m.group(1)) not in out:
+                    out.append(int(m.group(1)))
+    return out
+
+
 def parse_instructions(content: str) -> tuple[list[Instruction], list[str]]:
     """Split a Dockerfile into instructions, joining continuations and skipping comments/heredoc bodies."""
     instructions: list[Instruction] = []

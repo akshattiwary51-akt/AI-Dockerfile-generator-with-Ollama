@@ -162,14 +162,17 @@ class DockerBuilder:
         return True, f"Docker Engine {proc.stdout.strip()}"
 
     def build(self, project_dir: Path | str, image: str, *, on_output: Optional[Callable[[str], None]] = None,
-              cancel_event: Optional[threading.Event] = None) -> BuildResult:
+              cancel_event: Optional[threading.Event] = None, dockerfile: str = "Dockerfile") -> BuildResult:
         project = Path(project_dir).resolve()
-        cmd = ["docker", "build", "--progress=plain", "-t", image, "."]
+        if dockerfile != Path(dockerfile).name or dockerfile.startswith("-"):
+            raise ValueError("dockerfile must be a plain file name inside the project directory")
+        cmd = ["docker", "build", "--progress=plain", "-t", image] + \
+              (["-f", dockerfile] if dockerfile != "Dockerfile" else []) + ["."]
         started = time.monotonic()
-        if not (project / "Dockerfile").is_file():
+        if not (project / dockerfile).is_file():
             return BuildResult(success=False, image=image, command=cmd, exit_code=None,
-                               error_summary=f"No Dockerfile found in {project}.",
-                               non_recoverable_reason="Dockerfile missing")
+                               error_summary=f"No {dockerfile} found in {project}.",
+                               non_recoverable_reason=f"{dockerfile} missing")
         out_log = _BoundedLog(self.settings.max_log_bytes)
         err_log = _BoundedLog(self.settings.max_log_bytes)
         log.info("Starting build: %s (cwd=%s)", " ".join(cmd), project)

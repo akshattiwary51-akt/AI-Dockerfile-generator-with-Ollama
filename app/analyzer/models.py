@@ -18,6 +18,7 @@ class DependencyInfo(BaseModel):
     scripts: dict[str, str] = Field(default_factory=dict)
     module_name: Optional[str] = None
     main_entry: Optional[str] = None
+    workspaces: list[str] = Field(default_factory=list)
 
 
 class ProjectUnit(BaseModel):
@@ -38,6 +39,9 @@ class ProjectUnit(BaseModel):
     ports: list[int] = Field(default_factory=list)
     build_output_dir: Optional[str] = None
     notes: list[str] = Field(default_factory=list)
+    workspace_root: bool = False
+    confirmed: list[str] = Field(default_factory=list)  # facts read directly from files
+    inferred: list[str] = Field(default_factory=list)   # defaults / guesses the LLM should treat as assumptions
 
 
 class Strategy(BaseModel):
@@ -69,6 +73,8 @@ class ProjectAnalysis(BaseModel):
     file_count: int = 0
     skipped_sensitive_files: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    services: dict[str, str] = Field(default_factory=dict)  # infra service -> evidence (postgres/mysql/redis/mongo)
+    existing_compose: dict[str, list[str]] = Field(default_factory=dict)  # compose file -> service names
 
     @property
     def has_dockerfile(self) -> bool:

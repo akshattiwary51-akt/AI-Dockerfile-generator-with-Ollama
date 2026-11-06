@@ -15,6 +15,8 @@ log = get_logger("dockerfile_ai.deps")
 PYTHON_MANIFESTS = ("requirements.txt", "pyproject.toml", "Pipfile", "setup.py", "setup.cfg")
 NODE_MANIFESTS = ("package.json",)
 GO_MANIFESTS = ("go.mod",)
+PHP_MANIFESTS = ("composer.json",)
+RUBY_MANIFESTS = ("Gemfile",)
 JAVA_MANIFESTS = ("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
 
 NODE_LOCKFILES = (("pnpm-lock.yaml", "pnpm"), ("yarn.lock", "yarn"), ("package-lock.json", "npm"),
@@ -46,7 +48,7 @@ def _pep508_name(spec: str) -> str:
 
 def base_name(dep: str) -> str:
     """Return the lowercase package name of 'Flask==2.0' -> 'flask'."""
-    return re.split(r"[<>=!~\[\s@;]", dep.strip(), maxsplit=1)[0].lower().replace("_", "-")
+    return re.split(r"[<>=!~^*,(\[\s@;]", dep.strip(), maxsplit=1)[0].lower().replace("_", "-")
 
 
 # ----------------------------------------------------------------------------- Python
@@ -157,6 +159,10 @@ def detect_node(directory: Path) -> DependencyInfo:
         log.warning("Invalid package.json in %s: %s", directory, exc)
         data = {}
     info.module_name = data.get("name")
+    ws = data.get("workspaces")
+    if isinstance(ws, dict):
+        ws = ws.get("packages")
+    info.workspaces = [str(w) for w in ws] if isinstance(ws, list) else []
     main = data.get("main")
     info.main_entry = main if isinstance(main, str) else None
     info.dependencies = [f"{k}@{v}" for k, v in (data.get("dependencies") or {}).items()]
@@ -245,4 +251,50 @@ def detect_java(directory: Path) -> DependencyInfo:
         if (directory / wrapper).exists():
             info.manifests.append(wrapper)
     info.dependencies = list(dict.fromkeys(deps))
+    return info
+
+
+# ----------------------------------------------------------------------------- PHP
+def detect_php(directory: Path) -> DependencyInfo:
+    info = DependencyInfo(manifests=["composer.json"], package_manager="composer")
+    try:
+        data = json.loads(_read(directory / "composer.json") or "{}")
+        if not isinstance(data, dict):
+            data = {}
+    except json.JSONDecodeError as exc:
+        log.warning("Invalid composer.json in %s: %s", directory, exc)
+        data = {}
+    require = data.get("require") or {}
+    dev = data.get("require-dev") or {}
+    info.module_name = data.get("name")
+    for name, spec in require.items():
+        if name == "php":
+            m = re.search(r"(\d+\.\d+)", str(spec))
+            info.runtime_version = m.group(1) if m else None
+        elif not name.startswith("ext-"):
+            info.dependencies.append(f"{name}@{spec}")
+    info.dev_dependencies = [f"{k}@{v}" for k, v in dev.items()]
+    info.scripts = {k: str(v) for k, v in (data.get("scripts") or {}).items()}
+    if (directory / "composer.lock").exists():
+        info.lockfile = "composer.lock"
+    return info
+
+
+# ----------------------------------------------------------------------------- Ruby
+def detect_ruby(directory: Path) -> DependencyInfo:
+    info = DependencyInfo(manifests=["Gemfile"], package_manager="bundler")
+    text = _read(directory / "Gemfile")
+    for name, ver in re.findall(r"^\s*gem\s+['\"]([^'\"]+)['\"](?:\s*,\s*['\"]([^'\"]+)['\"])?", text, re.M):
+        info.dependencies.append(f"{name}@{ver}" if ver else name)
+    m = re.search(r"^\s*ruby\s+['\"]([\d.]+)['\"]", text, re.M)
+    if m:
+        info.runtime_version = m.group(1)
+    rv = directory / ".ruby-version"
+    if rv.is_file():
+        mm = re.search(r"(\d+\.\d+(?:\.\d+)?)", _read(rv))
+        if mm:
+            info.runtime_version = info.runtime_version or mm.group(1)
+            info.manifests.append(".ruby-version")
+    if (directory / "Gemfile.lock").exists():
+        info.lockfile = "Gemfile.lock"
     return info
